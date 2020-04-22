@@ -156,7 +156,7 @@ public class SimpleMovieLister {
 
 将ApplicationContext支持基于构造函数和的Setter DI为它所管理的豆类。在已经通过构造函数方法注入了某些依赖项之后，它还支持基于setter的DI。您可以以的形式配置依赖项，将BeanDefinition其与PropertyEditor实例结合使用以将属性从一种格式转换为另一种格式。但是，大多数Spring用户并不直接（即以编程方式）使用这些类，而是使用XML bean 定义，带注释的组件（即带有@Component， @Controller等等的类）或@Bean基于Java的@Configuration类中的方法。然后将这些源在内部转换为的实例，BeanDefinition并用于加载整个Spring IoC容器实例。
 
-> **基于构造函数或基于setter的DI？    
+> **基于构造函数或基于setter的DI？      
 > **
 >
 > 由于可以混合使用基于构造函数的DI和基于setter的DI，因此，将构造函数用于强制性依赖项，将setter方法或配置方法用于可选性依赖项是一个很好的经验法则。请注意，可以 在setter方法上使用@Required批注，以使该属性成为必需的依赖项。但是，最好使用带有参数的程序验证的构造函数注入。
@@ -797,6 +797,7 @@ Spring容器可以自动装配协作bean之间的关系。您可以通过检查�
 * 显式依赖项property和constructor-arg设置始终会覆盖自动装配。您无法自动装配简单的属性，例如基元 Strings，和Classes（以及此类简单属性的数组）。此限制是设计使然。
 
 * 自动装配不如显式接线精确。尽管如前所述，Spring还是谨慎地避免在可能产生意外结果的模棱两可的情况下进行猜测。Spring管理的对象之间的关系不再明确记录。
+
 * 接线信息可能不适用于可能从Spring容器生成文档的工具。
 
 * 容器中的多个bean定义可能与要自动装配的setter方法或构造函数参数指定的类型匹配。对于数组，集合或 Map实例，这不一定是问题。但是，对于期望单个值的依赖项，不会任意解决此歧义。如果没有唯一的bean定义可用，则引发异常。
@@ -872,7 +873,149 @@ public class CommandManager implements ApplicationContextAware {
 
 
 
+对于CommandManager前面的代码片段中的类，Spring容器动态地覆盖该createCommand\(\) 方法的实现。该CommandManager班没有任何Spring的依赖，因为返工例所示：
 
+```java
+package fiona.apple;
+
+// no more Spring imports!
+
+public abstract class CommandManager {
+
+    public Object process(Object commandState) {
+        // grab a new instance of the appropriate Command interface
+        Command command = createCommand();
+        // set the state on the (hopefully brand new) Command instance
+        command.setState(commandState);
+        return command.execute();
+    }
+
+    // okay... but where is the implementation of this method?
+    protected abstract Command createCommand();
+}
+```
+
+在包含要注入的方法的客户端类（CommandManager在本例中为）中，要注入的方法需要以下形式的签名：
+
+```
+<public|protected> [abstract] <return-type> theMethodName(no-arguments);
+```
+
+如果方法为abstract，则动态生成的子类将实现该方法。否则，动态生成的子类将覆盖原始类中定义的具体方法。考虑以下示例：
+
+```
+<!-- a stateful bean deployed as a prototype (non-singleton) -->
+<bean id="myCommand" class="fiona.apple.AsyncCommand" scope="prototype">
+    <!-- inject dependencies here as required -->
+</bean>
+
+<!-- commandProcessor uses statefulCommandHelper -->
+<bean id="commandManager" class="fiona.apple.CommandManager">
+    <lookup-method name="createCommand" bean="myCommand"/>
+</bean>
+```
+
+只要需要新的bean 实例，被标识为的bean 就会commandManager调用其自己的createCommand\(\)方法myCommand。myCommand如果确实需要，您必须小心地将bean 部署为原型。如果是单例，myCommand 则每次都返回Bean 的相同实例。
+
+
+
+另外，在基于注释的组件模型中，您可以通过@Lookup注释声明一个查找方法，如以下示例所示：
+
+```java
+public abstract class CommandManager {
+
+    public Object process(Object commandState) {
+        Command command = createCommand();
+        command.setState(commandState);
+        return command.execute();
+    }
+
+    @Lookup("myCommand")
+    protected abstract Command createCommand();
+}
+```
+
+或者，更习惯地说，您可以依赖于针对查找方法的声明返回类型解析的目标bean：
+
+```java
+public abstract class CommandManager {
+
+    public Object process(Object commandState) {
+        MyCommand command = createCommand();
+        command.setState(commandState);
+        return command.execute();
+    }
+
+    @Lookup
+    protected abstract MyCommand createCommand();
+}
+```
+
+请注意，通常应使用具体的存根实现声明此类带注释的查找方法，以使其与默认情况下忽略抽象类的Spring组件扫描规则兼容。
+
+此限制不适用于显式注册或显式导入的Bean类。
+
+> 访问范围不同的目标bean的另一种方法是ObjectFactory/ Provider注入点。请参阅将范围Bean作为依赖项。
+>
+> 您可能还会发现ServiceLocatorFactoryBean（在 org.springframework.beans.factory.config包装中）有用。
+
+#### 任意方法替换
+
+与查找方法注入相比，方法注入的一种不太有用的形式是能够用另一种方法实现替换托管bean中的任意方法。您可以放心地跳过本节的其余部分，直到您真正需要此功能为止。
+
+借助基于XML的配置元数据，您可以使用replaced-method元素将现有方法实现替换为已部署bean的另一个实现。考虑以下类，该类具有一个computeValue我们要重写的方法：
+
+```java
+public class MyValueCalculator {
+
+    public String computeValue(String input) {
+        // some real code...
+    }
+
+    // some other methods...
+}
+```
+
+实现该`org.springframework.beans.factory.support.MethodReplacer`接口的类提供了新的方法定义，如以下示例所示：
+
+```java
+/**
+ * meant to be used to override the existing computeValue(String)
+ * implementation in MyValueCalculator
+ */
+public class ReplacementComputeValue implements MethodReplacer {
+
+    public Object reimplement(Object o, Method m, Object[] args) throws Throwable {
+        // get the input value, work with it, and return a computed result
+        String input = (String) args[0];
+        ...
+        return ...;
+    }
+}
+```
+
+用于部署原始类并指定方法重写的Bean定义类似于以下示例：
+
+```XML
+<bean id="myValueCalculator" class="x.y.z.MyValueCalculator">
+    <!-- arbitrary method replacement -->
+    <replaced-method name="computeValue" replacer="replacementComputeValue">
+        <arg-type>String</arg-type>
+    </replaced-method>
+</bean>
+
+<bean id="replacementComputeValue" class="a.b.c.ReplacementComputeValue"/>
+```
+
+您可以&lt;arg-type/&gt;在元素内使用一个或多个元素&lt;replaced-method/&gt; 来指示要覆盖的方法的方法签名。仅当方法重载且类中存在多个变体时，才需要对参数签名。为了方便起见，参数的类型字符串可以是完全限定类型名称的子字符串。例如，以下所有匹配项 java.lang.String：
+
+```
+java.lang.String
+String
+Str
+```
+
+因为参数的数量通常足以区分每个可能的选择，所以通过让您仅键入与参数类型匹配的最短字符串，此快捷方式可以节省很多输入。
 
 
 
